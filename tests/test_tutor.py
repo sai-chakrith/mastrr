@@ -77,7 +77,7 @@ def test_falls_back_to_extractive_when_llm_call_raises(monkeypatch):
     result = tutor.generate_tutoring_explanation(REAL_SUB_SKILL)
 
     assert result["generated_by"] == "extractive_fallback"
-    assert result["llm_error"] == "simulated network failure"
+    assert result["llm_error"] == "RuntimeError"
     assert len(result["source_chunks"]) > 0
 
 
@@ -89,7 +89,7 @@ def test_falls_back_to_extractive_when_llm_returns_empty_text(monkeypatch):
     result = tutor.generate_tutoring_explanation(REAL_SUB_SKILL)
 
     assert result["generated_by"] == "extractive_fallback"
-    assert result["llm_error"] == "empty response from model"
+    assert result["llm_error"] == "ValueError"
 
 
 def test_extractive_fallback_with_no_chunks_returns_friendly_message():
@@ -99,3 +99,50 @@ def test_extractive_fallback_with_no_chunks_returns_friendly_message():
 def test_extractive_fallback_returns_top_chunk_text_verbatim():
     chunks = [("some_id#chunk1", "the most relevant paragraph"), ("other_id#chunk2", "a less relevant one")]
     assert tutor._extractive_fallback(chunks) == "the most relevant paragraph"
+
+
+def test_missing_notes_never_calls_model_or_invents_example(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-tests")
+    result = tutor.generate_tutoring_explanation("Not A Real Topic")
+    assert result["coverage"] == "missing"
+    assert result["source_chunks"] == []
+    assert result["worked_example"] is None
+    assert result["fallback_reason"] == "missing_notes"
+
+
+def test_short_notes_are_reported_without_unrelated_sources(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    result = tutor.generate_tutoring_explanation("Ratio & Proportion", top_k=5)
+    assert result["coverage"] == "limited"
+    assert all(c.startswith("ratio_and_proportion.txt#") for c in result["source_chunks"])
+
+
+def test_personalized_prompt_contains_observations_not_learner_identity(client, monkeypatch):
+    from conftest import run_diagnostic
+    from backend.database import get_cursor
+
+    def lookup(qid):
+        with get_cursor() as cur:
+            return cur.execute("SELECT correct_answer FROM questions WHERE id=?", (qid,)).fetchone()[0]
+
+    run_diagnostic(client, lookup, "private_learner", "Percentages", want_correct=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-tests")
+    fake_client = _FakeAnthropicClient(response=_FakeResponse("Teaching based on the supplied notes."))
+    monkeypatch.setattr(anthropic, "Anthropic", lambda **kwargs: fake_client)
+    result = tutor.generate_tutoring_explanation("Percentages", learner_id="private_learner")
+    prompt = fake_client.messages.calls[0]["messages"][0]["content"]
+    assert "private_learner" not in prompt
+    assert "observed_errors" in prompt
+    assert result["learner_context"]["observed_errors"]
+    assert result["learner_context"]["observed_errors"][0]["selected_answer"] is None
+    assert result["diagnosis"]["misconception"] is None
+    assert any("Legacy diagnostic" in s for s in result["limitations"])
+
+
+def test_provider_error_details_are_not_returned(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-tests")
+    fake_client = _FakeAnthropicClient(exc=RuntimeError("secret_provider_payload"))
+    monkeypatch.setattr(anthropic, "Anthropic", lambda **kwargs: fake_client)
+    result = tutor.generate_tutoring_explanation("Percentages")
+    assert "secret_provider_payload" not in str(result)
+    assert result["fallback_reason"] == "generation_failed"

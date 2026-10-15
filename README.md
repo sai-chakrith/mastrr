@@ -35,6 +35,20 @@ npm run dev
 
 Then open the local Vite URL shown in the terminal.
 
+## Personalized learning backend (Teammate 2)
+
+The API now also exposes `/learning/tutor`, `/learning/sessions`, and
+`/learning/reviews/{learner_id}` for evidence-aware tutoring, adaptive practice,
+fresh verification, and delayed review. See
+[the API contract and teammate handoff](docs/teammate-2-learning-contract.md)
+for request/response fields, provisional policies, and integration limitations.
+The existing frontend still uses the legacy retest flow until these routes are
+connected. Learning results do not automatically update mastery.
+
+Scoped retrieval uses a small standard-library TF-IDF index. Missing topic notes
+are reported rather than supplemented with unrelated material. Claude generation
+is optional (`ANTHROPIC_API_KEY`); without it, the tutor returns labeled excerpts.
+
 ## Validation status
 
 The project is currently valid for a first review with these checks passing:

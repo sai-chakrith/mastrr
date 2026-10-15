@@ -12,9 +12,9 @@ more (e.g. a "Profit & Loss" paragraph that opens by explaining it
 depends on Percentages can outscore a genuine Percentages paragraph for
 the query "Explain Percentages..."). But Track 2's own plan is explicit
 that retrieval should be scoped to "that sub-skill" -- so this version
-restricts ranking to the target sub-skill's own notes file first, and
-only falls back to the full corpus if that sub-skill has no dedicated
-file yet (e.g. a newly-added Sem 2 DSA topic before its notes exist).
+restricts ranking to the target sub-skill's own notes file. Missing or
+short topic material is reported honestly instead of padded with unrelated
+content. Unscoped searches remain available for general corpus exploration.
 
 File-to-sub_skill matching is done by token set rather than a hardcoded
 slug rule, because the notes filenames aren't perfectly consistent
@@ -23,12 +23,11 @@ for "Ratio & Proportion") -- token-set matching handles both without
 special-casing either.
 """
 import glob
+import math
 import os
 import re
+from collections import Counter
 from pathlib import Path
-
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 
 NOTES_DIR = Path(__file__).resolve().parent.parent / "knowledge" / "notes"
 
@@ -45,7 +44,7 @@ def load_chunks(notes_folder=NOTES_DIR):
     chunks, chunk_ids, file_of_chunk = [], [], []
     for filepath in sorted(glob.glob(os.path.join(notes_folder, "*.txt"))):
         stem = os.path.splitext(os.path.basename(filepath))[0]
-        with open(filepath) as f:
+        with open(filepath, encoding="utf-8") as f:
             paragraphs = [p.strip() for p in f.read().split("\n\n") if p.strip()]
         for i, para in enumerate(paragraphs):
             chunks.append(para)
@@ -62,8 +61,28 @@ def _build_file_token_index(file_of_chunk):
 # Loaded once per process -- the notes corpus doesn't change at request time.
 _CHUNKS, _CHUNK_IDS, _FILE_OF_CHUNK = load_chunks()
 _FILE_TOKEN_INDEX = _build_file_token_index(_FILE_OF_CHUNK)
-_VECTORIZER = TfidfVectorizer(stop_words="english")
-_CHUNK_VECTORS = _VECTORIZER.fit_transform(_CHUNKS) if _CHUNKS else None
+# The small paragraph corpus does not need a native scientific runtime.
+# Smoothed TF-IDF weights and cosine normalization, implemented directly.
+_STOP_WORDS = frozenset("a an and are as at be by for from in is it of on or that the this to with explain concept common mistakes examples".split())
+
+
+def _terms(text):
+    return [t for t in re.findall(r"\b\w\w+\b", text.lower()) if t not in _STOP_WORDS]
+
+
+_DOCUMENT_TERMS = [Counter(_terms(chunk)) for chunk in _CHUNKS]
+_DOCUMENT_FREQUENCIES = Counter(term for counts in _DOCUMENT_TERMS for term in counts)
+_IDF = {term: math.log((1 + len(_CHUNKS)) / (1 + frequency)) + 1
+        for term, frequency in _DOCUMENT_FREQUENCIES.items()}
+
+
+def _vector(text):
+    weights = {term: count * _IDF[term] for term, count in Counter(_terms(text)).items() if term in _IDF}
+    norm = math.sqrt(sum(w * w for w in weights.values()))
+    return {term: weight / norm for term, weight in weights.items()} if norm else {}
+
+
+_CHUNK_VECTORS = [_vector(chunk) for chunk in _CHUNKS]
 
 
 def _indices_for_sub_skill(sub_skill: str):
@@ -76,29 +95,23 @@ def _indices_for_sub_skill(sub_skill: str):
 def _rank(query: str, candidate_indices) -> list:
     if not candidate_indices:
         return []
-    query_vector = _VECTORIZER.transform([query])
-    sub_matrix = _CHUNK_VECTORS[candidate_indices]
-    scores = cosine_similarity(query_vector, sub_matrix)[0]
-    order = sorted(range(len(candidate_indices)), key=lambda i: scores[i], reverse=True)
-    return [candidate_indices[i] for i in order]
+    query_vector = _vector(query)
+    scores = {i: sum(weight * _CHUNK_VECTORS[i].get(term, 0)
+                     for term, weight in query_vector.items()) for i in candidate_indices}
+    return sorted(scores, key=lambda i: scores[i], reverse=True)
 
 
 def retrieve_top_chunks(query: str, top_k: int = 3, sub_skill: str = None):
     """Returns a list of (chunk_id, chunk_text) tuples, most relevant first.
-    When sub_skill is given and has a matching notes file, results are
-    restricted to that file; otherwise falls back to the full corpus."""
-    if _CHUNK_VECTORS is None:
+    An explicit topic never falls back to other topics. A short result is
+    useful evidence of missing coverage, not a reason to pad the context.
+    """
+    if top_k < 1:
+        raise ValueError("top_k must be positive")
+    if not _CHUNK_VECTORS:
         return []
-
-    ranked_indices = []
-    if sub_skill:
-        ranked_indices = _rank(query, _indices_for_sub_skill(sub_skill))
-
-    if len(ranked_indices) < top_k:
-        # backfill from the rest of the corpus without duplicating what we have
-        already = set(ranked_indices)
-        rest = [i for i in range(len(_CHUNKS)) if i not in already]
-        ranked_indices += _rank(query, rest)
+    candidates = _indices_for_sub_skill(sub_skill) if sub_skill is not None else range(len(_CHUNKS))
+    ranked_indices = _rank(query, candidates)
 
     top = ranked_indices[:top_k]
     return [(_CHUNK_IDS[i], _CHUNKS[i]) for i in top]

@@ -36,8 +36,11 @@ from backend.database import get_cursor, init_db, is_seeded, loads
 from backend.graph_utils import graph_as_contract, load_graph
 from backend.seed_data import seed_all
 from backend.tutor import generate_tutoring_explanation
+from backend.learning_api import router as learning_router
+from backend.learning_store import init_learning_tables
 
 app = FastAPI(title="Mastrr API", version="0.1.0")
+app.include_router(learning_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -50,6 +53,7 @@ app.add_middleware(
 @app.on_event("startup")
 def on_startup():
     init_db()
+    init_learning_tables()
     if not is_seeded():
         seed_all()
 
@@ -203,7 +207,7 @@ def tutor(body: TutorRequest):
             detail="No gap on record for this learner/sub_skill -- run /gaps first.",
         )
 
-    generated = generate_tutoring_explanation(body.sub_skill)
+    generated = generate_tutoring_explanation(body.sub_skill, learner_id=body.learner_id)
 
     with get_cursor() as cur:
         cur.execute(
